@@ -26,7 +26,6 @@ from ..constants.measurement import FTR_WELL
 # Consumed and cleared by loaddata.py immediately after calling
 # convert_image_to_objects() so it never leaks between image sets.
 _original_label_map = {}
-print("[COSMX PATCH] cellprofiler_core/utilities/image.py: sparse label patch is active")
 
 
 def convert_image_to_objects(image):
@@ -52,9 +51,29 @@ def convert_image_to_objects(image):
 
     assert isinstance(image, numpy.ndarray)
     if image.ndim == 2:
-        # Normalise float input (unlikely for object images, but safe to handle)
+        # Normalise float input. FileImage may normalise integer masks to
+        # float [0, 1] by dividing by the dtype max (e.g. 65535 for uint16
+        # or 4294967295 for uint32). We recover the original integer values
+        # by finding the scale factor from the actual data range rather than
+        # assuming a fixed uint16 scale, which would silently zero-out all
+        # labels when the source is uint32.
         if numpy.issubdtype(image.dtype, numpy.floating):
-            image = numpy.round(image * 65535).astype(numpy.int32)
+            img_max = float(image.max())
+            if img_max > 0:
+                # Determine the most likely integer scale: try uint16 first,
+                # then uint32. Choose whichever gives a max closest to an
+                # integer after rescaling.
+                for scale in (65535.0, 4294967295.0):
+                    rescaled = image * scale
+                    if numpy.abs(rescaled.max() - numpy.round(rescaled.max())) < 0.5:
+                        image = numpy.round(rescaled).astype(numpy.int32)
+                        break
+                else:
+                    # Fallback: just round whatever we have
+                    image = numpy.round(image * 65535).astype(numpy.int32)
+            else:
+                # All zeros — empty mask
+                return numpy.zeros(image.shape, dtype=numpy.int32)
 
         # Find all unique non-zero labels (original pixel values / cell IDs)
         unique_orig = numpy.unique(image.ravel())
