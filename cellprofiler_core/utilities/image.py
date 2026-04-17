@@ -20,6 +20,15 @@ from ..constants.image import FILE_SCHEME
 from ..constants.measurement import FTR_WELL
 
 
+# Module-level lookup table populated by convert_image_to_objects().
+# Maps sequential label (1-based position in the sorted unique-labels array)
+# -> original pixel value from the mask TIFF.
+# Consumed and cleared by loaddata.py immediately after calling
+# convert_image_to_objects() so it never leaks between image sets.
+_original_label_map = {}
+print("[COSMX PATCH] cellprofiler_core/utilities/image.py: sparse label patch is active")
+
+
 def convert_image_to_objects(image):
     """Interpret an image as object indices
 
@@ -27,24 +36,52 @@ def convert_image_to_objects(image):
 
     returns - a similarly shaped integer array with zero representing background
               and other values representing the indices of the associated object.
+
+    PATCH: for 2-D integer or near-integer images (the normal case for label
+    masks stored as uint16 TIFFs) we relabel to a dense sequential range
+    (1, 2, 3, …) as the rest of CellProfiler expects, BUT we first record the
+    mapping from each new sequential label back to its original pixel value in
+    the module-level dict _original_label_map.  loaddata.py reads this dict
+    immediately after and writes the original IDs as a per-object measurement
+    (Metadata_original_object_id) so they can be matched back to proseg output.
+
+    Behaviour for colour (3-D) images is unchanged.
     """
+    global _original_label_map
+    _original_label_map = {}
+
     assert isinstance(image, numpy.ndarray)
     if image.ndim == 2:
-        unique_indices = numpy.unique(image.ravel())
-        if len(unique_indices) * 2 > max(numpy.max(unique_indices), 254) and numpy.all(
-            numpy.abs(numpy.round(unique_indices, 1) - unique_indices)
-            <= numpy.finfo(float).eps
-        ):
-            # Heuristic: reinterpret only if sparse and roughly integer
-            return numpy.round(image).astype(int)
+        # Normalise float input (unlikely for object images, but safe to handle)
+        if numpy.issubdtype(image.dtype, numpy.floating):
+            image = numpy.round(image * 65535).astype(numpy.int32)
 
-        def sorting(x):
-            return [x]
+        # Find all unique non-zero labels (original pixel values / cell IDs)
+        unique_orig = numpy.unique(image.ravel())
+        unique_orig = unique_orig[unique_orig != 0]   # strip background
 
-        def comparison(i0, i1):
-            return image.ravel()[i0] != image.ravel()[i1]
+        if len(unique_orig) == 0:
+            # Empty FOV — no objects
+            return numpy.zeros(image.shape, dtype=numpy.int32)
+
+        # Build a lookup array: orig_pixel_value -> sequential_label (1-based)
+        # Using a lookup array is O(max_val) memory but O(1) per pixel,
+        # which is faster than fancy indexing for large images.
+        max_orig = int(unique_orig.max())
+        lut = numpy.zeros(max_orig + 1, dtype=numpy.int32)
+        for seq_label, orig_val in enumerate(unique_orig, start=1):
+            lut[int(orig_val)] = seq_label
+            _original_label_map[seq_label] = int(orig_val)
+
+        # Apply the remapping to produce a dense sequential label image
+        clipped = numpy.clip(image, 0, max_orig).astype(numpy.int32)
+        remapped = lut[clipped]
+        # Pixels whose original value was 0 (background) map to lut[0] == 0 ✓
+        # Pixels > max_orig cannot exist (max_orig is the max of unique values)
+        return remapped
 
     else:
+        # Colour image: original lexsort / cumsum relabelling, no ID mapping needed
         i, j = numpy.mgrid[0 : image.shape[0], 0 : image.shape[1]]
 
         def sorting(x):

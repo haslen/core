@@ -62,7 +62,8 @@ from ..utilities.core.modules.load_data import is_file_name_feature
 from ..utilities.core.modules.load_data import is_objects_file_name_feature
 from ..utilities.core.modules.load_data import is_objects_url_name_feature
 from ..utilities.core.modules.load_data import is_url_name_feature
-from ..utilities.image import convert_image_to_objects
+from ..utilities.image import convert_image_to_objects, _original_label_map as _get_original_label_map
+from ..utilities import image as _image_module
 from ..utilities.image import generate_presigned_url
 from ..utilities.measurement import get_length_from_varchar
 from ..utilities.measurement import is_well_column_token
@@ -1123,11 +1124,29 @@ safe to press it.""",
                 provider = self.fetch_provider(objects_name, m, is_image_name=False)
                 image = provider.provide_image(workspace.image_set)
                 pixel_data = convert_image_to_objects(image.pixel_data)
+                # PATCH: capture the sequential->original ID map written by
+                # convert_image_to_objects() before it is cleared on the next call.
+                original_id_map = dict(_image_module._original_label_map)
                 o = Objects()
                 o.segmented = pixel_data
                 object_set.add_objects(o, objects_name)
                 add_object_count_measurements(m, objects_name, o.count)
                 add_object_location_measurements(m, objects_name, pixel_data)
+                # Write original pixel value (proseg cell ID) for each object
+                # as Metadata_original_object_id so it survives into the output CSV.
+                # One value per sequential object index (1-based), aligned with
+                # all other per-object measurements.
+                if original_id_map:
+                    n = o.count
+                    orig_ids = numpy.array(
+                        [original_id_map.get(i + 1, 0) for i in range(n)],
+                        dtype=numpy.int32,
+                    )
+                    m.add_measurement(
+                        objects_name,
+                        "Metadata_original_object_id",
+                        orig_ids,
+                    )
 
         for feature_name in sorted(features):
             value = m.get_measurement("Image", feature_name)
@@ -1282,6 +1301,13 @@ safe to press it.""",
             #
             for object_name in self.get_object_names():
                 result += get_object_measurement_columns(object_name)
+                # PATCH: declare the original pixel value column so that
+                # ExportToSpreadsheet includes it in the output CSV.
+                result.append((
+                    object_name,
+                    "Metadata_original_object_id",
+                    COLTYPE_INTEGER,
+                ))
                 for feature, coltype in (
                     (C_OBJECTS_URL, COLTYPE_VARCHAR_PATH_NAME,),
                     (C_OBJECTS_PATH_NAME, COLTYPE_VARCHAR_PATH_NAME,),
