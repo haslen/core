@@ -59,21 +59,19 @@ def convert_image_to_objects(image):
         # labels when the source is uint32.
         if numpy.issubdtype(image.dtype, numpy.floating):
             img_max = float(image.max())
-            if img_max > 0:
-                # Determine the most likely integer scale: try uint16 first,
-                # then uint32. Choose whichever gives a max closest to an
-                # integer after rescaling.
-                for scale in (65535.0, 4294967295.0):
-                    rescaled = image * scale
-                    if numpy.abs(rescaled.max() - numpy.round(rescaled.max())) < 0.5:
-                        image = numpy.round(rescaled).astype(numpy.int32)
-                        break
-                else:
-                    # Fallback: just round whatever we have
-                    image = numpy.round(image * 65535).astype(numpy.int32)
-            else:
+            if img_max <= 0:
                 # All zeros — empty mask
                 return numpy.zeros(image.shape, dtype=numpy.int32)
+            # Determine the integer scale used for normalisation.
+            # FileImage divides by dtype max: 65535 for uint16, 4294967295
+            # for uint32. We pick the scale whose result is >= 1.0 (i.e.
+            # the one that actually recovers integer label values >= 1).
+            # We try uint16 first; if the rescaled max is still < 0.5 it
+            # means the source was uint32, so we use that scale instead.
+            scale = 65535.0
+            if img_max * scale < 0.5:
+                scale = 4294967295.0
+            image = numpy.round(image.astype(numpy.float64) * scale).astype(numpy.int32)
 
         # Find all unique non-zero labels (original pixel values / cell IDs)
         unique_orig = numpy.unique(image.ravel())
